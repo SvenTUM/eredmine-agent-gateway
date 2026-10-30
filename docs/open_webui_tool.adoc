@@ -1,0 +1,124 @@
+= Open WebUI Integration: Easy8 Workspace Tool
+:toc:
+:sectnums:
+
+== Overview
+
+The workspace tool `integrations/open_webui/erag_tool.py` gives the LLMs in Open WebUI read-only access to Easy8 (Easy Redmine). It offers the seven agent tools: `whoami`, `list_projects`, `search_issues`, `get_issue`, `get_issue_history`, `list_time_entries` and `project_summary`. See the user manual for the tool reference and output format.
+
+* *Personal access only.* Every user stores their own Easy8 API key in the tool's user settings. Each request runs with that key, so Easy8's permissions apply unchanged. No service account is involved.
+* *Read-only.* The tool contains no function that writes to Easy8.
+* *Why a workspace tool and not MCP?* Open WebUI's native MCP integration supports only one administrator-defined credential per server (Bearer) or OAuth 2.1. Neither can carry the personal Easy8 API key of each user.
+
+The tool file only adapts the Python package `eredmine-agent-gateway` to Open WebUI. The package must therefore be installed in the Open WebUI container, either automatically (variant A) or in a custom image (variant B).
+
+NOTE: Menu names differ slightly between Open WebUI versions. The steps below refer to Open WebUI 0.11.
+
+== Prerequisites
+
+Clarify these points before installing:
+
+[cols="2,3"]
+|===
+|Topic |Requirement
+
+|Workers and replicas
+|Variant A needs a single Open WebUI process (`UVICORN_WORKERS=1`, one replica). With several workers or replicas, use variant B.
+
+|Package installation
+|Variant A: `ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS` must not be `False`, and offline mode must be off.
+
+|Outbound access
+|Variant A: the container must reach `github.com` (release archive) and `pypi.org` (build tools), directly or through a mirror/proxy configured via `PIP_OPTIONS` / `PIP_PACKAGE_INDEX_OPTIONS`. Variant B needs this access only while building the image.
+
+|Easy8 address
+|The Easy8 URL must be reachable from the Docker host. HTTPS is strongly recommended, because the personal API keys are sent with every request.
+
+|Key encryption
+|Set `ENABLE_VALVE_ENCRYPTION=true` so that the personal API keys are stored encrypted. This requires a fixed `WEBUI_SECRET_KEY`; if it changes, stored keys become unreadable and users must enter them again.
+
+|Access
+|Decide which groups and models may use the tool.
+|===
+
+== Installation
+
+=== Variant A: Automatic Installation
+
+The header of the tool file contains the line
+
+[source,text]
+----
+requirements: eredmine-agent-gateway @ https://github.com/SvenTUM/eredmine-agent-gateway/archive/refs/tags/v4.0.0.tar.gz
+----
+
+When an administrator saves the tool, and again when Open WebUI starts, Open WebUI installs this package version with `pip`. Nothing else has to be prepared. Continue with <<register>>.
+
+=== Variant B: Custom Image
+
+Build an image that already contains the package and disable the automatic installation:
+
+[source,dockerfile]
+----
+FROM ghcr.io/open-webui/open-webui:v0.11.0
+RUN pip install --no-cache-dir \
+    "eredmine-agent-gateway @ https://github.com/SvenTUM/eredmine-agent-gateway/archive/refs/tags/v4.0.0.tar.gz"
+ENV ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS=False
+----
+
+Use the Open WebUI version you run in production as base image. Rebuild the image for every Open WebUI update and every new eredmine-agent-gateway release.
+
+[[register]]
+=== Register the Tool
+
+. Sign in to Open WebUI as administrator.
+. Open *Workspace* → *Tools* and create a new tool.
+. Replace the editor content with the complete content of `integrations/open_webui/erag_tool.py` from the release (tag `v4.0.0`).
+. Enter a tool name (e.g. `Easy8`) and save. In variant A, the package is installed now; the first save can take a minute.
+. Open the tool's *Valves* (administrator settings):
+** `easy8_base_url`: the Easy8 address reachable from the Docker host. If left empty, the tool uses the environment variable `ERAG_BASE_URL` of the Open WebUI container, or a configuration file there (see the user manual). The package itself only knows the placeholder `https://easy8.example.com`.
+** `request_timeout_seconds`: timeout per Easy8 request (default 10).
+. Restrict access to the intended groups, and enable the tool for the intended models (*Workspace* → *Models* → model → *Tools*).
+
+For GPT models, *native* function calling (model settings → advanced parameters → *Function Calling*) usually gives the best tool use.
+
+== End-User Setup
+
+. In Easy8, open *My account* and copy your *API access key* (create one if none is shown).
+. In Open WebUI, start a chat with a model that has the tool enabled, or enable the tool in the chat's tool menu.
+. Open the tool's user settings (*Valves*) in the chat and paste the key into `easy8_api_key`. The field is masked.
+. Ask a question, for example _"Welche offenen Tickets sind mir zugewiesen?"_ or _"Fasse den Status von Projekt Kundenportal zusammen."_
+
+Without a key, the tool answers with an instruction to set it and sends no request to Easy8.
+
+== Updating to a New Release
+
+. Open the tool in *Workspace* → *Tools* and replace its content with the file from the new release. Its `requirements` line points to the new version.
+. Variant A: save; Open WebUI installs the new version. Variant B: rebuild the image with the new version first, then deploy it and save the tool.
+
+User settings (API keys) are kept.
+
+== Troubleshooting
+
+[cols="2,3"]
+|===
+|Symptom |Cause and solution
+
+|Saving the tool fails with `No module named 'eredmine_agent_gateway'`
+|The package is not installed. Variant A: check outbound access, the worker count and `ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS`, and the Open WebUI log. Variant B: check that the running image contains the package.
+
+|Answer: "No personal Easy8 API key is configured ..."
+|The user has not entered a key in the tool's user settings.
+
+|`Authentication failed (HTTP 401)`
+|The key is wrong or revoked, or the REST API is not enabled for the user in Easy8.
+
+|`Access denied (HTTP 403)` / `Not found (HTTP 404)`
+|The user's Easy8 permissions do not cover the requested object. This is intended.
+
+|`GET request failed ... Connection refused` or timeouts
+|Easy8 is not reachable from the container. Check `easy8_base_url`, DNS, firewall and proxy settings.
+
+|All users lost their keys after a restart
+|`WEBUI_SECRET_KEY` changed while valve encryption is enabled. Set a fixed secret; users re-enter their keys.
+|===

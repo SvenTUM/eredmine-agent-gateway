@@ -1,0 +1,588 @@
+= eredmine-agent-gateway User Manual
+
+:author: Sven van Crombrugge
+:toc:
+:sectnums:
+
+== Introduction
+
+`eredmine-agent-gateway` gives automation scripts and AI agents read-only access to the Easy8 ticket system (Easy Redmine). It provides:
+
+* seven *agent tools* with compact, token-efficient output (see <<agent-tools>>),
+* a local *MCP server* for coding harnesses such as Claude Code, opencode and Antigravity (`agy`) (see <<mcp>>),
+* an *Open WebUI workspace tool* for self-hosted LLMs (see the separate installation guide `docs/open_webui_tool.adoc`),
+* a *command line interface* `erag` and a *Python API* (`Easy8Manager`).
+
+Every request uses the personal Easy8 API key of the calling user, so Easy8's access rights always apply. Write requests are blocked unless the system configuration explicitly allows them (see <<write-lock>>).
+
+== Installation
+
+`eredmine-agent-gateway` requires Python 3.10 or newer. Install a tagged release from GitHub:
+
+[source,bash]
+----
+pip install "eredmine-agent-gateway @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0"
+----
+
+The MCP server needs the optional `mcp` extra:
+
+[source,bash]
+----
+pip install "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0"
+----
+
+Harness users do not need a permanent installation; `uvx` runs the MCP server directly from the release (see <<mcp>>).
+
+[[configuration]]
+== Configuration
+
+`eredmine-agent-gateway` reads its settings from environment variables and from a per-user configuration file. The package contains only neutral example values: configure the address of your Easy8 server and, where they differ from Redmine's standard data, the closed statuses and priorities of your installation.
+
+Each setting is resolved in this order: explicit argument (where the Python API offers one), environment variable, configuration file, built-in default.
+
+[cols="2,2,5,2"]
+|===
+|Variable |File key |Purpose |Default
+
+|`REDMINE_API_KEY`
+|-
+|*Required.* Your personal Easy8 API key (Easy8: _My account_ → _API access key_). Read from the environment only.
+|-
+
+|`ERAG_BASE_URL`
+|`base_url`
+|Base URL of the Easy8 server. Must start with `http://` or `https://`; an empty value counts as unset.
+|`https://easy8.example.com` (placeholder)
+
+|`ERAG_CLOSED_STATUS_IDS`
+|`closed_status_ids`
+|Comma-separated issue status IDs that count as closed in the offline statistics (`stats`, e.g. `5,6`). The agent tools and `summary` follow the status definitions of the Easy8 installation instead.
+|`5,6`
+
+|`ERAG_PRIORITY_MAP`
+|`priority_map`
+|Priority ID to label mapping for `summary`, as pairs (`1=Low,2=Normal`) or JSON (`{"1": "Low"}`).
+|`1=Low, 2=Normal, 3=High, 4=Urgent, 5=Immediate`
+
+|`ERAG_ALLOW_WRITE`
+|-
+|Enables write requests when set to `true`, `1` or `yes` (case-insensitive). Any other value keeps writes blocked. Read from the environment only (see <<write-lock>>).
+|blocked
+
+|`ERAG_CONFIG`
+|-
+|Path of the configuration file.
+|`~/.erag/config.ini`
+|===
+
+The defaults for closed statuses and priorities follow Redmine's standard data.
+
+[[config-file]]
+=== Configuration File
+
+The configuration file is an INI file with the section `[easy8]`. It belongs outside of any repository, by default at `~/.erag/config.ini` (Windows: `%USERPROFILE%\.erag\config.ini`), next to the local cache. Values use the same format as the environment variables:
+
+[source,ini]
+----
+# Settings of one Easy8 installation
+[easy8]
+base_url = https://easy8.example.com
+closed_status_ids = 5, 6
+priority_map = 1=Low, 2=Normal, 3=High, 4=Urgent, 5=Immediate
+----
+
+* The file is read as UTF-8, so labels may contain umlauts.
+* Without a file at the default location, the defaults apply. A file named by `ERAG_CONFIG` must exist.
+* Unknown keys and a file without an `[easy8]` section are ignored with a warning on stderr.
+* The API key and the write lock are never read from the file.
+* A team can hand out one prepared file for its installation; every user copies it to the default location.
+
+[[write-lock]]
+=== Write Lock
+
+`eredmine-agent-gateway` is read-only by default. The HTTP client refuses every write request (POST/PUT) with an `Easy8WriteDisabledError` before anything is sent to Easy8, unless `ERAG_ALLOW_WRITE=true` is set in the environment of the process. There is intentionally no programmatic override: the system configuration alone decides.
+
+This affects the write methods of the Python API (`create_time_entry`, `update_issue`). The agent tools, the MCP server and the Open WebUI tool offer no write functions at all.
+
+To verify your configuration and connection, run:
+
+[source,bash]
+----
+erag auth-check
+----
+
+[[agent-tools]]
+== Agent Tools
+
+The same seven read-only tools are available through the MCP server, the Open WebUI workspace tool and the CLI. For the same arguments, all three return exactly the same output. Tools only read live data from Easy8; nothing is cached.
+
+[cols="1,3,2"]
+|===
+|Tool |Purpose |Parameters
+
+|`whoami`
+|The user who owns the API key (id, login, name). Resolves "me".
+|-
+
+|`list_projects`
+|Visible projects (id, identifier, name, parent). Maps project names to IDs.
+|`name_contains`, `include_closed` (false), `limit` (50), `offset` (0)
+
+|`search_issues`
+|Issues, most recently updated first, without descriptions.
+|`project_id`, `status` (`open` \| `closed` \| `all` \| status ID; default `open`), `assigned_to` (`me` \| user ID), `updated_since` (YYYY-MM-DD), `limit` (25), `offset` (0)
+
+|`get_issue`
+|One issue in full detail: description, custom fields, relations, child issues, attachment metadata and comments (journals with notes, oldest first; private notes flagged).
+|`issue_id`, `max_journals` (20; 0 = none)
+
+|`get_issue_history`
+|Change history of one issue: the periods spent in each status (with days, current status included) and the changes of status, assignee, priority, due date, start date and done ratio with date and author, oldest first.
+|`issue_id`, `max_changes` (50; 0 = none)
+
+|`list_time_entries`
+|Time entries, or hour totals per group with `group_by` (over all matching entries, capped at 2,000; `"incomplete": true` above the cap).
+|`user` (`me` \| user ID), `project_id`, `issue_id`, `from_date`, `to_date`, `group_by` (`user` \| `project` \| `issue` \| `activity` \| `date`), `limit` (50), `offset` (0)
+
+|`project_summary`
+|Markdown status summary of a project (German, see <<summary>>).
+|`project_id`, `stale_days` (14)
+|===
+
+`status` "open" and "closed" follow the status definitions configured in Easy8. `limit` accepts 1–100.
+
+=== Output Contract
+
+JSON results are optimized for a small token footprint:
+
+* compact serialization without indentation or spaces; umlauts are not escaped,
+* fields with `null` or empty values are omitted,
+* reference objects are flattened to their name (`"status":"In Bearbeitung"`); IDs are kept only where needed for follow-up calls (`project_id`, `assigned_to_id`, `parent_id`, `issue_id`),
+* timestamps are shortened to dates (`YYYY-MM-DD`),
+* list results use the envelope `{"items":[...],"total":N,"next_offset":M}`; `next_offset` is only present if more results exist and is passed as `offset` to continue.
+
+Example (`search_issues`):
+
+[source,json]
+----
+{"items":[{"id":101,"subject":"Login schlägt fehl","project":"Kundenportal","tracker":"Fehler","status":"In Bearbeitung","priority":"Hoch","assigned_to":"Ben Bearbeiter","due_date":"2026-08-30","updated":"2026-08-18"}],"total":37,"next_offset":25}
+----
+
+Errors are reported as short messages without credentials, e.g. `Access denied (HTTP 403): your Easy8 permissions do not allow this request.`
+
+[[mcp]]
+== AI Agent Integration (MCP)
+
+`erag mcp` starts a local MCP server over stdio that exposes the seven agent tools. All tools carry the MCP read-only annotation. The server reads `REDMINE_API_KEY` from its environment and the other settings as described in <<configuration>>; the harness passes environment variables in its MCP configuration. It opens no network port.
+
+The examples use `uvx` (part of https://docs.astral.sh/uv/[uv]), which runs the server directly from the tagged GitHub release:
+
+[source,bash]
+----
+uvx --from "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0" erag mcp
+----
+
+=== Claude Code
+
+[source,bash]
+----
+claude mcp add --scope user --env REDMINE_API_KEY=<your-key> erag -- \
+  uvx --from "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0" erag mcp
+----
+
+Check the connection with `claude mcp list`.
+
+=== opencode
+
+Add the server to `opencode.json` (project) or the global opencode configuration:
+
+[source,json]
+----
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "erag": {
+      "type": "local",
+      "command": [
+        "uvx", "--from",
+        "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0",
+        "erag", "mcp"
+      ],
+      "environment": { "REDMINE_API_KEY": "{env:REDMINE_API_KEY}" },
+      "enabled": true
+    }
+  }
+}
+----
+
+`{env:REDMINE_API_KEY}` takes the key from your shell environment, so it is not stored in the file.
+
+=== Antigravity (`agy`)
+
+Add the server to the global configuration `~/.gemini/config/mcp_config.json`:
+
+[source,json]
+----
+{
+  "mcpServers": {
+    "erag": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmine-agent-gateway@v4.0.0",
+        "erag", "mcp"
+      ],
+      "env": { "REDMINE_API_KEY": "<your-key>" }
+    }
+  }
+}
+----
+
+NOTE: At the time of writing, `agy` ignores project-local MCP configurations and only loads the global file. After removing a server, also delete its cached copy under `~/.gemini/antigravity/mcp/`.
+
+=== Updating
+
+To use a newer release, replace the tag (e.g. `@v4.0.0`) in the configuration and restart the harness.
+
+== Command Line Interface (CLI)
+
+The CLI provides the agent tools and the local cache commands in the terminal. Tool commands print the same compact JSON as the MCP server; errors go to stderr with exit code 1. Pipe the output through `jq` for a readable view.
+
+=== Who Am I
+
+[source,bash]
+----
+erag whoami
+----
+
+=== Listing Projects
+
+[source,bash]
+----
+erag projects [--name <text>] [--include-closed] [--limit <n>] [--offset <n>]
+----
+
+=== Managing Issues
+
+==== Fetching a Single Issue
+Retrieve one issue with description, custom fields, relations, child issues, attachment metadata and comments.
+[source,bash]
+----
+erag issue <issue_id> [--max-journals <n>]
+----
+Example: `erag issue 1234 --max-journals 5`
+
+==== Change History of an Issue
+Show the periods an issue spent in each status and the changes of status, assignee, priority, dates and done ratio.
+[source,bash]
+----
+erag history <issue_id> [--max-changes <n>]
+----
+Example: `erag history 1234 --max-changes 10`
+
+Status, priority and user names are resolved with the permissions of the user; values that cannot be resolved appear as `status <id>`, `priority <id>` or `user <id>`.
+
+==== Searching Issues
+Search issues, most recently updated first.
+[source,bash]
+----
+erag issues [--project-id <id>] [--status open|closed|all|<status-id>] [--assigned-to me|<user-id>] [--updated-since <YYYY-MM-DD>] [--limit <n>] [--offset <n>]
+----
+Example: `erag issues --project-id 42 --assigned-to me`
+
+=== Managing Time Entries
+
+List time entries, or aggregate hours per user, project, issue, activity or date.
+[source,bash]
+----
+erag time-entries [--user me|<user-id>] [--project-id <id>] [--issue-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--group-by user|project|issue|activity|date] [--limit <n>] [--offset <n>]
+----
+Example: `erag time-entries --user me --from 2026-09-01 --to 2026-09-30 --group-by project`
+
+=== MCP Server
+
+[source,bash]
+----
+erag mcp
+----
+Starts the read-only MCP server over stdio (see <<mcp>>). Requires the `mcp` extra.
+
+=== Data Synchronization
+
+The commands `sync`, `report-base` and `stats` work on a local SQLite cache (`~/.erag/cache.db`) that belongs to the current operating system user. The cache contains what the synchronizing user may see in Easy8; do not share it between users. The agent tools never use it.
+
+To populate the local SQLite database with incremental updates from a specific project, use the `sync` command. This will fetch new and updated issues, open and closed (including status, priority, start date, and due date), along with their comments.
+[source,bash]
+----
+erag sync --project-id <id>
+----
+
+=== Reporting
+
+Generate a deterministic Markdown report of a project's status using the local database cache. This provides a fast overview of open issues and recent activity without querying the API.
+[source,bash]
+----
+erag report-base --project-id <id>
+----
+
+=== Project Statistics
+
+Display aggregated statistics for a project directly from the local database cache without making API calls. Metrics include issue breakdown (total, open, closed), issues without time bookings, stale issues exceeding an inactivity threshold, comment statistics, average age of open issues, due date overview (overdue and due within 7 days), total tracked hours across all time entries, and the timestamp of the last synchronization.
+
+[source,bash]
+----
+erag stats --project-id <id> [--stale-days <days>] [--json]
+----
+
+* `--project-id <id>`: Required numeric project ID.
+* `--stale-days <days>`: Inactivity threshold in days for classifying stale issues (default: `14`).
+* `--json`: Output raw metrics in JSON format instead of the formatted text table.
+
+Example text output:
+[source,text]
+----
+Projektstatus – Projekt 42
+══════════════════════════════════════
+Issues gesamt:                      3
+  Offen:                            2
+  Geschlossen:                      1
+
+Issues ohne Zeitbuchung:            1
+Issues ohne Aktivität (>14 Tage):   1
+Issues mit Kommentaren:             2
+
+Durchschn. Alter offener Issues:   15 Tage
+Gesamtstunden (alle Zeiteinträge): 5,5 h
+
+Fälligkeitsübersicht:
+  Überfällig:                       1
+  Fällig in ≤7 Tagen:               1
+
+Letzte Synchronisation:    2026-08-18T20:30:00
+══════════════════════════════════════
+----
+
+[[summary]]
+=== Live Project Summary
+
+Generate a structured Markdown summary of a project using live data directly from the Easy8 API. The generated document is designed for AI report agents and includes general project status KPIs, highlighted warnings (overdue issues, stale issues exceeding an inactivity threshold, and issues due within 7 days), an open issues table with the current status and the days since it applies, time booking metrics, and recent customer communication.
+
+Open and closed issues follow the status definitions of the Easy8 installation; `ERAG_CLOSED_STATUS_IDS` does not apply here. The details (age, comments, issues without time entries, communication) are computed from the open issues; the number of closed issues comes directly from Easy8.
+
+Unlike `report-base` or `stats`, `summary` does not require prior local database synchronization and fetches fresh data live from the API.
+
+* All time entries of the project are included, across all API pages.
+* If you lack the permission to view time entries, the summary is still generated; hours and time metrics show `nicht verfügbar`.
+* Private notes are never listed in the customer communication section.
+
+[source,bash]
+----
+erag summary --project-id <id> [--stale-days <days>]
+----
+
+* `--project-id <id>`: Required numeric project ID.
+* `--stale-days <days>`: Inactivity threshold in days for classifying stale open issues (default: `14`).
+
+Example markdown output snippet:
+[source,markdown]
+----
+# Projektzusammenfassung: Projekt 42 (ID: 42)
+
+## Projektstatus
+
+| Kennzahl | Wert |
+|---|---|
+| Issues gesamt | 3 |
+| Offen | 2 |
+| Geschlossen | 1 |
+| Ø Alter offener Issues | 15 Tage |
+| Offene Issues ohne Zeitbuchung | 1 |
+| Issues ohne Aktivität (>14 Tage) | 1 |
+| Offene Issues mit Kommentaren | 2 |
+| Gesamtstunden | 5,5 h |
+| Letzte Aktivität | 2026-08-18 |
+
+---
+
+## ⚠️ Warnungen
+
+> ⚠️ **1 Issue überfällig** (Fälligkeitsdatum überschritten, noch offen):
+> - #101 „Login Fehler" – fällig seit 2026-08-10 (Priorität: High)
+
+> ⚠️ **1 Issue stale** (>14 Tage ohne Aktivität, noch offen):
+> - #102 „Refactoring" – letzte Aktivität: 2026-08-01 (Priorität: Normal)
+
+---
+
+## Offene Issues
+
+| ID | Betreff | Status | Im Status (Tage) | Priorität | Fällig am | Alter (Tage) | Kommentare |
+|---|---|---|---|---|---|---|---|
+| 101 | Login Fehler | In Arbeit | 6 | High | 2026-08-10 | 20 | 3 |
+| 102 | Refactoring | New | 18 | Normal | - | 18 | 0 |
+
+---
+
+## Zeitbuchungen (Zusammenfassung)
+
+| Kennzahl | Wert |
+|---|---|
+| Gesamtstunden | 5,5 h |
+| Buchungen gesamt | 4 |
+| Ø Stunden pro Buchung | 1,4 h |
+
+---
+
+## Kundenkommunikation in offenen Issues (letzte 10 Kommentare)
+
+| Issue | Betreff | Kommentar (Auszug) | Datum |
+|---|---|---|---|
+| #101 | Login Fehler | „Kunde meldet Timeout..." | 2026-08-15 |
+----
+
+== Python API (`Easy8Manager`)
+
+For integration into python scripts or automation workflows, `eredmine-agent-gateway` provides the `Easy8Manager` class.
+
+=== Initialization
+[source,python]
+----
+from eredmine_agent_gateway.manager import Easy8Manager
+
+manager = Easy8Manager() # Automatically resolves the REDMINE_API_KEY
+----
+
+`Easy8Manager(api_key=None, base_url=None, request_timeout=10, max_retries=3, retry_backoff=1.0)` resolves the API key from `REDMINE_API_KEY` and the base URL as described in <<configuration>> when they are not passed explicitly.
+
+=== Available Methods
+* `get_current_user()`: The user who owns the API key.
+* `get_user(user_id: int)`: One user, as far as the API key may see them.
+* `get_issue_statuses()`: The issue statuses of the installation (`id`, `name`, `is_closed`).
+* `get_issue_priorities()`: The issue priorities of the installation (`id`, `name`).
+* `get_project(project_id: int | str, params: dict | None = None)`: Fetch a single project.
+* `get_projects_page(params: dict | None = None)`: One page of projects and the total count, as `(items, total)`.
+* `get_issue(issue_id: int, params: dict | None = None)`: Fetch a single issue.
+* `get_issues(params: dict | None = None)`: Fetch a list of issues matching parameters.
+* `get_issues_page(params: dict | None = None)`: One page of issues and the total count, as `(items, total)`.
+* `get_issue_relations(issue_id: int)`: Get relations for a specific issue.
+* `get_time_entries(request_params: dict | None = None)`: Fetch time entries.
+* `get_time_entries_page(params: dict | None = None)`: One page of time entries and the total count, as `(items, total)`.
+* `create_time_entry(time_entry_parameters: TimeEntryParams)`: Create a new time entry. *Requires `ERAG_ALLOW_WRITE=true`* (see <<write-lock>>).
+* `update_issue(issue_id: int, update_parameters: dict)`: Update an existing issue. *Requires `ERAG_ALLOW_WRITE=true`*.
+
+Failed requests raise `Easy8RequestError`, whose `status_code` attribute holds the HTTP status (or `None` without a response). Blocked writes raise `Easy8WriteDisabledError`.
+
+=== Agent Tools (`Easy8Tools`)
+
+The agent tools can also be used directly from Python. Each method returns the same string as the MCP tool of the same name:
+
+[source,python]
+----
+from eredmine_agent_gateway.manager import Easy8Manager
+from eredmine_agent_gateway.tools import Easy8Tools, describe_error
+
+tools = Easy8Tools(Easy8Manager())
+print(tools.search_issues(project_id=42, assigned_to="me"))
+----
+
+`describe_error(exc)` turns an exception into the short message the adapters show.
+
+== Local Data Caching (`Easy8DB`)
+
+For scenarios that require fast, incremental data access without repeatedly querying the API (e.g., generating analytical reports), `eredmine-agent-gateway` provides a local SQLite data persistence layer with automatic schema migrations.
+
+=== Initialization
+[source,python]
+----
+from eredmine_agent_gateway.db import Easy8DB
+
+# Initializes a connection to the SQLite cache (default path: ~/.erag/cache.db)
+# Supports context management to safely close connections
+with Easy8DB() as db:
+    # use db...
+    pass
+----
+
+=== Available Methods
+* `upsert_project(project: dict)`: Insert or update a project record (fields: `id`, `name`, `description`, `identifier`).
+* `upsert_issue(issue: dict)`: Insert or update an issue record (fields: `id`, `project_id`, `subject`, `description`, `status_id`, `author_id`, `due_date`, `start_date`, `priority_id`).
+* `upsert_comment(comment: dict)`: Insert or update a comment record (fields: `id`, `issue_id`, `notes`, `author_id`, `created_on`).
+* `close()`: Close the underlying SQLite database connection.
+
+=== Data Synchronization
+
+To fetch incremental updates via the Python API and cache them in the database, you can use the `sync` module. It synchronizes issue attributes (including status, priority, start date, and due date) as well as comments.
+
+[source,python]
+----
+from eredmine_agent_gateway.sync import sync_project
+
+# Fetches incrementally and upserts to Easy8DB (db and manager are optional parameters)
+sync_project(project_id)
+----
+
+=== Reporting
+
+To generate a deterministic Markdown report from the local database cache programmatically:
+
+[source,python]
+----
+from eredmine_agent_gateway.reporting import generate_base_report
+
+# Generates a markdown string containing project overview, open issues, and recent activity
+report = generate_base_report(project_id)
+print(report)
+----
+
+=== Project Statistics
+
+To compute and format aggregated project metrics from the local database cache programmatically:
+
+[source,python]
+----
+from eredmine_agent_gateway.stats import compute_project_stats, format_stats_text, format_stats_json
+
+# Compute statistics dictionary (stale_days defaults to 14, db and closed_status_ids are optional)
+stats = compute_project_stats(project_id=42, stale_days=14)
+
+# Format as human-readable text table
+text_output = format_stats_text(stats, project_id=42)
+print(text_output)
+
+# Format as JSON string
+json_output = format_stats_json(stats)
+print(json_output)
+----
+
+== Configuration Helpers (`eredmine_agent_gateway.config`)
+
+The `eredmine_agent_gateway.config` module resolves the settings described in <<configuration>>:
+
+* `resolve_api_key(explicit_api_key: str | None = None) -> str`: Resolves the Easy8 API key.
+* `resolve_base_url(explicit_base_url: str | None = None) -> str`: Resolves the Easy8 base URL (argument, `ERAG_BASE_URL`, configuration file, default).
+* `resolve_allow_write() -> bool`: Whether `ERAG_ALLOW_WRITE` enables write requests.
+* `resolve_closed_status_ids() -> frozenset[int]`: Resolves the closed issue status IDs (`ERAG_CLOSED_STATUS_IDS`, configuration file, default `frozenset({5, 6})`).
+* `resolve_priority_map() -> dict[int, str]`: Resolves the mapping of priority IDs to display labels (`ERAG_PRIORITY_MAP`, configuration file, default `{1: "Low", 2: "Normal", 3: "High", 4: "Urgent", 5: "Immediate"}`).
+* `resolve_config_path() -> Path`: The configuration file in use (`ERAG_CONFIG`, otherwise `default_config_path()`, i.e. `~/.erag/config.ini`).
+* `read_config_file() -> dict[str, str]`: The settings of the `[easy8]` section of that file.
+
+[source,python]
+----
+from eredmine_agent_gateway.config import resolve_closed_status_ids, resolve_priority_map
+
+closed_ids = resolve_closed_status_ids()  # e.g. frozenset({5, 6})
+priority_map = resolve_priority_map()     # e.g. {1: 'Low', 2: 'Normal', 3: 'High', 4: 'Urgent', 5: 'Immediate'}
+----
+
+== Live Project Summary (`eredmine_agent_gateway.summary`)
+
+For generating AI-ready project summary Markdown documents live from the Easy8 API without relying on local SQLite caching:
+
+[source,python]
+----
+from eredmine_agent_gateway.summary import generate_summary
+
+# Generate Markdown summary (stale_days defaults to 14, manager is optional)
+summary_md = generate_summary(project_id=42, stale_days=14)
+print(summary_md)
+----

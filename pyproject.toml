@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eredmine-agent-gateway"
+version = "4.0.0"
+description = "Generic Easy8 (Easy Redmine) access package"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests"
+]
+
+[project.scripts]
+erag = "eredmine_agent_gateway.cli:main"
+
+[project.optional-dependencies]
+mcp = [
+  "mcp>=2.2,<3"
+]
+test = [
+  "pytest>=8.0",
+  "mcp>=2.2,<3"
+]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["eredmine_agent_gateway*"]
