@@ -3,7 +3,7 @@ title: Easy8
 author: Sven van Crombrugge
 author_url: https://github.com/SvenTUM/eredmine-agent-gateway
 version: 4.0.0
-license: GPL-3.0
+license: GPL-3.0-or-later
 description: Read-only access to Easy8 (Easy Redmine) with each user's personal API key.
 required_open_webui_version: 0.11.0
 requirements: eredmine-agent-gateway @ https://github.com/SvenTUM/eredmine-agent-gateway/archive/refs/tags/v4.0.0.tar.gz

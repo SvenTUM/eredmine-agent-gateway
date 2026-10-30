@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,10 +7,18 @@ name = "eredmine-agent-gateway"
 version = "4.0.0"
 description = "Generic Easy8 (Easy Redmine) access package"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Sven van Crombrugge" }]
 requires-python = ">=3.10"
 dependencies = [
   "requests"
 ]
+
+[project.urls]
+Repository = "https://github.com/SvenTUM/eredmine-agent-gateway"
+Issues = "https://github.com/SvenTUM/eredmine-agent-gateway/issues"
+Security = "https://github.com/SvenTUM/eredmine-agent-gateway/security/policy"
 
 [project.scripts]
 erag = "eredmine_agent_gateway.cli:main"

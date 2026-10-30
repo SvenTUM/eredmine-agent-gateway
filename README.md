@@ -46,3 +46,17 @@ uvx --from "eredmine-agent-gateway[mcp] @ git+https://github.com/SvenTUM/eredmin
 ## Documentation
 
 See the [user manual](docs/user_manual.adoc) for configuration, the tool reference and MCP setup per harness.
+
+## Security
+
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in public issues.
+
+## License
+
+Copyright (C) 2026 Sven van Crombrugge
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See [LICENSE](LICENSE) for details.
+
+## Trademarks
+
+This is an independent project. It is not affiliated with or endorsed by Easy Software or the Redmine project. Easy8, Easy Redmine and Redmine are trademarks of their respective owners.
